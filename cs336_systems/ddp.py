@@ -1,20 +1,26 @@
 import os
 import torch
+import torch.nn as nn
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-def setup(rank, world_size):
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "29500"
-    dist.init_process_group("gloo", rank=rank, world_size=world_size)
 
-def distributed_demo(rank, world_size):
-    setup(rank, world_size)
-    data = torch.randint(0, 10, (3,))
-    print(f"rank {rank} data (before all-reduce): {data}")
-    dist.all_reduce(data, async_op=False)
-    print(f"rank {rank} data (after all-reduce): {data}")
+class NaiveDDP(nn.Module):
+    def __init__(self, module: nn.Module):
+        super().__init__()
+        self.module: nn.Module = module
 
-if __name__ == "__main__":
-    world_size = 4
-    mp.spawn(fn=distributed_demo, args=(world_size, ), nprocs=world_size, join=True)
+        with torch.no_grad():
+            for param in self.module.parameters():
+                dist.broadcast(param, src=0)
+
+    def forward(self, data):
+        return self.module(data)
+    
+    def finish_gradient_synchronization(self):
+        for param in self.module.parameters():
+            if not param.requires_grad or param.grad is None:
+                continue
+
+            # Average gradients
+            dist.all_reduce(param.grad, op=dist.ReduceOp.AVG, async_op=False)
